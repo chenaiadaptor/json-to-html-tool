@@ -704,7 +704,7 @@ async function convertFile() {
     verifyNode(obj);
 
     const mdLines = jsonToMarkdown(obj);
-    generatedMarkdown = mdLines.join("\n\n");
+    generatedMarkdown = mdLines.join(String.fromCharCode(10, 10));
 
     const pageName = obj.name || "知识库页面";
     const showHeaders = SHOW_HEADERS[pageType] || SHOW_HEADERS.general;
