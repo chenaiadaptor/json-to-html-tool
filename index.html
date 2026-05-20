@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>JSON 知识库转 HTML 工具</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Microsoft YaHei", system-ui, sans-serif;
+  background: #f5f7fa;
+  color: #333;
+}
+
+.app {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 40px 20px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 28px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.06);
+}
+
+h1 {
+  font-size: 28px;
+  margin-bottom: 12px;
+}
+
+.desc {
+  color: #666;
+  line-height: 1.7;
+  margin-bottom: 24px;
+}
+
+.form-row {
+  margin: 18px 0;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+input,
+select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+button {
+  border: none;
+  background: #2563eb;
+  color: #fff;
+  padding: 12px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 15px;
+  margin-right: 10px;
+  margin-top: 10px;
+}
+
+button:hover {
+  background: #1d4ed8;
+}
+
+button.secondary {
+  background: #10b981;
+}
+
+button.secondary:hover {
+  background: #059669;
+}
+
+.status {
+  margin-top: 18px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  display: none;
+  line-height: 1.6;
+}
+
+.status.ok {
+  display: block;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.status.err {
+  display: block;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.preview {
+  margin-top: 26px;
+  display: none;
+}
+
+.preview h2 {
+  font-size: 20px;
+  margin-bottom: 12px;
+}
+
+iframe {
+  width: 100%;
+  height: 600px;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  background: #fff;
+}
+</style>
+</head>
+
+<body>
+<div class="app">
+  <div class="card">
+    <h1>📚 JSON 知识库转 HTML 工具</h1>
+    <p class="desc">
+      上传符合结构的 JSON 文件，工具会在浏览器本地生成 Markdown 和 HTML。
+      文件不会上传到服务器，转换过程都在当前浏览器内完成。
+    </p>
+
+    <div class="form-row">
+      <label for="jsonFile">选择 JSON 文件</label>
+      <input id="jsonFile" type="file" accept=".json,application/json" />
+    </div>
+
+    <div class="form-row">
+      <label for="pageType">页面类型</label>
+      <select id="pageType">
+        <option value="general">世界设定 general</option>
+        <option value="character">角色档案 character</option>
+        <option value="event">剧情事件 event</option>
+        <option value="relation">关系网 relation</option>
+      </select>
+    </div>
+
+    <button onclick="convertFile()">开始转换</button>
+    <button class="secondary" onclick="downloadHtml()" id="downloadHtmlBtn" disabled>下载 HTML</button>
+    <button class="secondary" onclick="downloadMarkdown()" id="downloadMdBtn" disabled>下载 Markdown</button>
+
+    <div id="status" class="status"></div>
+
+    <div class="preview" id="previewBox">
+      <h2>预览</h2>
+      <iframe id="previewFrame"></iframe>
+    </div>
+  </div>
+</div>
+
+<script>
+const SHOW_HEADERS = {
+  general: "h1,h2,h3,h4,h5",
+  character: "h1,h2,h3",
+  event: "h1,h2,h3,h4",
+  relation: "h1,h2,h3,h4"
+};
+
+let generatedHtml = "";
+let generatedMarkdown = "";
+let outputBaseName = "wiki";
+
+function setStatus(message, type = "ok") {
+  const status = document.getElementById("status");
+  status.textContent = message;
+  status.className = "status " + type;
+}
+
+function verifyNode(obj) {
+  const requiredKeys = ["name", "level", "hint", "data", "is_standard"];
+
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    throw new Error("节点必须是 object 类型");
+  }
+
+  for (const key of requiredKeys) {
+    if (!(key in obj)) {
+      throw new Error(`节点缺少必要字段：${key}`);
+    }
+  }
+
+  const hint = obj.hint;
+
+  if (!["str", "list", "dict", "node"].includes(hint)) {
+    throw new Error(`不支持的 hint 类型：${hint}`);
+  }
+
+  if (hint === "str") {
+    if (!obj.data || typeof obj.data !== "object" || !("value" in obj.data)) {
+      throw new Error(`str 节点的 data 必须包含 value 字段：${obj.name}`);
+    }
+  }
+
+  if (["list", "dict", "node"].includes(hint)) {
+    if (!Array.isArray(obj.data)) {
+      throw new Error(`${hint} 节点的 data 必须是数组：${obj.name}`);
+    }
+
+    for (const child of obj.data) {
+      if (hint === "list") {
+        continue;
+      }
+      verifyNode(child);
+    }
+  }
+}
+
+function escapeBackticks(value) {
+  return String(value ?? "").replace(/`/g, "\\`");
+}
+
+function jsonToMarkdown(obj, depth = 1, index = "") {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    throw new Error("jsonToMarkdown 输入必须是 object");
+  }
+
+  if (depth > 5) {
+    throw new Error("层级过多，最多支持 5 层标题");
+  }
+
+  const name = obj.name;
+  const level = obj.level;
+  const isStandard = obj.is_standard;
+  const data = obj.data;
+  const hint = obj.hint;
+
+  let prefix = "#".repeat(depth);
+
+  if (index) {
+    prefix += ` ${index}`;
+  }
+
+  const lvl = level ? ` (${level})` : "";
+  const title = isStandard
+    ? `${prefix} ${name}${lvl}`
+    : `${prefix} \`${name}${lvl}\``;
+
+  if (hint === "str") {
+    const value = data?.value ?? "";
+    return [title, `\`${escapeBackticks(value)}\``];
+  }
+
+  if (hint === "list") {
+    const lines = [title];
+
+    for (const item of data) {
+      let value = "";
+
+      if (item && typeof item === "object" && "value" in item) {
+        value = item.value;
+      } else {
+        value = String(item ?? "");
+      }
+
+      lines.push(`* \`${escapeBackticks(value)}\``);
+    }
+
+    return lines;
+  }
+
+  if (hint === "dict") {
+    const lines = [title];
+
+    for (const node of data) {
+      const key = node.name;
+      const value = node.data?.value ?? "";
+      const nodeLevel = node.level ? ` (${node.level})` : "";
+
+      if (node.is_standard) {
+        lines.push(`${key}${nodeLevel}: \`${escapeBackticks(value)}\``);
+      } else {
+        lines.push(`\`${key}${nodeLevel}\`: \`${escapeBackticks(value)}\``);
+      }
+    }
+
+    return lines;
+  }
+
+  if (hint === "node") {
+    const lines = [title];
+
+    data.forEach((node, i) => {
+      const childIndex = `${index}${i + 1}.`;
+      lines.push(...jsonToMarkdown(node, depth + 1, childIndex));
+    });
+
+    return lines;
+  }
+
+  throw new Error(`无效 hint：${hint}`);
+}
+
+function buildHtmlPage(markdown, pageName, showHeaders) {
+  const markdownJson = JSON.stringify(markdown);
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${pageName}</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"><\/script>
+<style>
+:root {
+  --sidebar-width: 360px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Microsoft YaHei", system-ui, sans-serif;
+  background: #f5f7fa;
+  color: #333;
+}
+
+.wrap {
+  display: flex;
+  min-height: 100vh;
+}
+
+.aside {
+  width: var(--sidebar-width);
+  background: #fff;
+  border-right: 1px solid #eee;
+  position: fixed;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 20px 15px;
+}
+
+.resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 5px;
+  height: 100%;
+  cursor: col-resize;
+  background-color: transparent;
+  transition: background-color 0.2s;
+}
+
+.resizer:hover,
+.resizer.resizing {
+  background-color: #2563eb;
+}
+
+.nav-links {
+  margin-bottom: 25px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid #eee;
+}
+
+.nav-links h3,
+.toc-container h3 {
+  font-size: 16px;
+  margin-bottom: 12px;
+  color: #222;
+}
+
+.nav-links a {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  margin: 4px 0;
+  color: #555;
+  text-decoration: none;
+  border-radius: 6px;
+  font-size: 14px;
+  background: #f9fafc;
+}
+
+.nav-links a:hover {
+  background: #eef2ff;
+  color: #2563eb;
+}
+
+.toc-item {
+  margin: 2px 0;
+}
+
+.toc-content {
+  display: flex;
+  align-items: center;
+}
+
+.toc-content a {
+  flex: 1;
+  padding: 6px 8px;
+  color: #555;
+  text-decoration: none;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toc-content a:hover {
+  background: #f0f4f9;
+  color: #2563eb;
+}
+
+.toc-content a.active {
+  background: #2563eb;
+  color: #fff;
+}
+
+.toc-toggle {
+  width: 20px;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  color: #888;
+  font-size: 12px;
+}
+
+.toc-dot {
+  cursor: default;
+  font-size: 16px;
+  transform: translateY(-2px);
+}
+
+.toc-children {
+  padding-left: 18px;
+}
+
+.main {
+  flex: 1;
+  margin-left: var(--sidebar-width);
+  padding: 30px 50px;
+  max-width: 1000px;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5 {
+  margin: 1.5em 0 0.8em;
+  scroll-margin-top: 20px;
+}
+
+.markdown-body p {
+  margin: 1em 0;
+  line-height: 1.8;
+}
+
+.markdown-body code {
+  background: #e5e7eb;
+  padding: 2px 5px;
+  border-radius: 3px;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 2em;
+  margin: 1em 0;
+}
+
+@media (max-width: 768px) {
+  .aside {
+    display: none;
+  }
+
+  .main {
+    margin-left: 0;
+    padding: 20px;
+  }
+}
+</style>
+</head>
+
+<body>
+<div class="wrap">
+  <div class="aside" id="sidebar">
+    <div class="resizer" id="drag-resizer"></div>
+
+    <div class="nav-links">
+      <h3>📚 IP知识库</h3>
+      <a href="general.html">🌍 世界设定</a>
+      <a href="character.html">👥 角色档案</a>
+      <a href="event.html">🎬 剧情事件</a>
+      <a href="relation.html">🕸️ 关系网</a>
+    </div>
+
+    <div class="toc-container">
+      <h3>📑 文档目录</h3>
+      <div id="toc"></div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div id="content" class="markdown-body"></div>
+  </div>
+</div>
+
+<script>
+const mdContent = ${markdownJson};
+const contentDom = document.getElementById("content");
+contentDom.innerHTML = marked.parse(mdContent);
+
+const resizer = document.getElementById("drag-resizer");
+let isResizing = false;
+
+resizer.addEventListener("mousedown", () => {
+  isResizing = true;
+  resizer.classList.add("resizing");
+  document.body.style.userSelect = "none";
+  document.body.style.cursor = "col-resize";
+});
+
+document.addEventListener("mousemove", (e) => {
+  if (!isResizing) return;
+
+  let newWidth = e.clientX;
+  if (newWidth < 220) newWidth = 220;
+  if (newWidth > 600) newWidth = 600;
+
+  document.documentElement.style.setProperty("--sidebar-width", newWidth + "px");
+});
+
+document.addEventListener("mouseup", () => {
+  if (isResizing) {
+    isResizing = false;
+    resizer.classList.remove("resizing");
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+  }
+});
+
+function buildToc() {
+  const tocDom = document.getElementById("toc");
+  const headers = contentDom.querySelectorAll("${showHeaders}");
+
+  const nodes = [];
+
+  headers.forEach((el, idx) => {
+    const id = \`heading-\${idx}\`;
+    el.id = id;
+
+    const level = parseInt(el.tagName.substring(1));
+    nodes.push({
+      id,
+      level,
+      text: el.textContent,
+      el
+    });
+  });
+
+  nodes.forEach((node, i) => {
+    node.hasChild = i + 1 < nodes.length && nodes[i + 1].level > node.level;
+  });
+
+  const rootContainer = document.createElement("div");
+  const stack = [{ level: 0, container: rootContainer }];
+
+  nodes.forEach(node => {
+    while (stack[stack.length - 1].level >= node.level) {
+      stack.pop();
+    }
+
+    const parent = stack[stack.length - 1];
+
+    const itemDiv = document.createElement("div");
+    itemDiv.className = "toc-item";
+
+    const contentDiv = document.createElement("div");
+    contentDiv.className = "toc-content";
+
+    const a = document.createElement("a");
+    a.href = \`#\${node.id}\`;
+    a.textContent = node.text;
+
+    const toggleSpan = document.createElement("span");
+    toggleSpan.className = "toc-toggle";
+
+    if (node.hasChild) {
+      const isCollapsed = node.level > 1;
+      toggleSpan.textContent = isCollapsed ? "▶" : "▼";
+      toggleSpan.classList.add(isCollapsed ? "collapsed" : "expanded");
+
+      const childrenContainer = document.createElement("div");
+      childrenContainer.className = "toc-children";
+
+      if (isCollapsed) {
+        childrenContainer.style.display = "none";
+      }
+
+      toggleSpan.onclick = (e) => {
+        e.stopPropagation();
+
+        if (childrenContainer.style.display === "none") {
+          childrenContainer.style.display = "block";
+          toggleSpan.textContent = "▼";
+          toggleSpan.classList.replace("collapsed", "expanded");
+        } else {
+          childrenContainer.style.display = "none";
+          toggleSpan.textContent = "▶";
+          toggleSpan.classList.replace("expanded", "collapsed");
+        }
+      };
+
+      contentDiv.appendChild(toggleSpan);
+      contentDiv.appendChild(a);
+      itemDiv.appendChild(contentDiv);
+      itemDiv.appendChild(childrenContainer);
+
+      parent.container.appendChild(itemDiv);
+      stack.push({ level: node.level, container: childrenContainer });
+    } else {
+      toggleSpan.textContent = "•";
+      toggleSpan.classList.add("toc-dot");
+
+      contentDiv.appendChild(toggleSpan);
+      contentDiv.appendChild(a);
+      itemDiv.appendChild(contentDiv);
+
+      parent.container.appendChild(itemDiv);
+    }
+  });
+
+  tocDom.appendChild(rootContainer);
+}
+
+buildToc();
+
+const headers = contentDom.querySelectorAll("${showHeaders}");
+
+window.addEventListener("scroll", () => {
+  let curId = "";
+
+  headers.forEach(h => {
+    const top = h.getBoundingClientRect().top;
+    if (top <= 80) curId = h.id;
+  });
+
+  document.querySelectorAll("#toc a.active").forEach(link => {
+    link.classList.remove("active");
+  });
+
+  if (curId) {
+    const activeLink = document.querySelector(\`#toc a[href="#\${curId}"]\`);
+
+    if (activeLink) {
+      activeLink.classList.add("active");
+
+      let parent = activeLink.closest(".toc-children");
+
+      while (parent) {
+        if (parent.style.display === "none") {
+          parent.style.display = "block";
+
+          const toggle = parent.previousElementSibling.querySelector(".toc-toggle");
+
+          if (toggle && toggle.classList.contains("collapsed")) {
+            toggle.textContent = "▼";
+            toggle.classList.replace("collapsed", "expanded");
+          }
+        }
+
+        parent = parent.parentElement.closest(".toc-children");
+      }
+    }
+  }
+});
+<\/script>
+</body>
+</html>`;
+}
+
+async function convertFile() {
+  const fileInput = document.getElementById("jsonFile");
+  const pageType = document.getElementById("pageType").value;
+
+  if (!fileInput.files.length) {
+    setStatus("请先选择一个 JSON 文件。", "err");
+    return;
+  }
+
+  const file = fileInput.files[0];
+  outputBaseName = file.name.replace(/\.json$/i, "") || "wiki";
+
+  try {
+    const text = await file.text();
+    const obj = JSON.parse(text);
+
+    verifyNode(obj);
+
+    const mdLines = jsonToMarkdown(obj);
+    generatedMarkdown = mdLines.join("\\n\\n");
+
+    const pageName = obj.name || "知识库页面";
+    const showHeaders = SHOW_HEADERS[pageType] || SHOW_HEADERS.general;
+
+    generatedHtml = buildHtmlPage(generatedMarkdown, pageName, showHeaders);
+
+    document.getElementById("downloadHtmlBtn").disabled = false;
+    document.getElementById("downloadMdBtn").disabled = false;
+
+    const previewBox = document.getElementById("previewBox");
+    const previewFrame = document.getElementById("previewFrame");
+
+    previewBox.style.display = "block";
+    previewFrame.srcdoc = generatedHtml;
+
+    setStatus("转换成功！可以下载 HTML 或 Markdown。", "ok");
+  } catch (err) {
+    console.error(err);
+    setStatus("转换失败：" + err.message, "err");
+  }
+}
+
+function downloadBlob(content, filename, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  URL.revokeObjectURL(url);
+}
+
+function downloadHtml() {
+  if (!generatedHtml) {
+    setStatus("请先完成转换。", "err");
+    return;
+  }
+
+  downloadBlob(generatedHtml, `${outputBaseName}.html`, "text/html;charset=utf-8");
+}
+
+function downloadMarkdown() {
+  if (!generatedMarkdown) {
+    setStatus("请先完成转换。", "err");
+    return;
+  }
+
+  downloadBlob(generatedMarkdown, `${outputBaseName}.md`, "text/markdown;charset=utf-8");
+}
+</script>
+</body>
+</html>
